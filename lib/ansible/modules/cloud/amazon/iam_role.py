@@ -47,6 +47,12 @@ options:
         To embed an inline policy, use M(iam_policy). To remove existing policies, use an empty list item.
     required: true
     aliases: ['managed_policies']
+  remove_unlisted_policies:
+    description:
+      - Detaches any managed policies not listed in the "managed_policy" option. Set to false if you want to attach policies elsewhere.
+    type: bool
+    default: true
+    version_added: "2.4"
   state:
     description:
       - Create or remove the IAM role
@@ -236,6 +242,15 @@ def create_or_update_role(connection, module):
             for policy in current_attached_policies:
                 try:
                     connection.detach_role_policy(RoleName=params['RoleName'], PolicyArn=policy['PolicyArn'])
+                except (ClientError, ParamValidationError) as e:
+                    module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+
+            # Detach policies not present
+            current_attached_policies_arn_list = [policy['PolicyArn'] for policy in current_attached_policies]
+
+            for policy_arn in list(set(current_attached_policies_arn_list) - set(managed_policies)):
+                try:
+                    connection.detach_role_policy(RoleName=params['RoleName'], PolicyArn=policy['PolicyArn'])
                 except ClientError as e:
                     module.fail_json(msg=e.message, exception=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
                 changed = True
@@ -341,7 +356,7 @@ def get_attached_policy_list(connection, module, name):
         return connection.list_attached_role_policies(RoleName=name)['AttachedPolicies']
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchEntity':
-            return None
+            return []
         else:
             module.fail_json(msg=e.message, exception=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
 
@@ -355,7 +370,8 @@ def main():
             path=dict(default="/", type='str'),
             assume_role_policy_document=dict(type='json'),
             managed_policy=dict(type='list', aliases=['managed_policies']),
-            state=dict(choices=['present', 'absent'], required=True)
+            state=dict(choices=['present', 'absent'], required=True),
+            remove_unlisted_policies=dict(type='bool', default=True),
         )
     )
 
