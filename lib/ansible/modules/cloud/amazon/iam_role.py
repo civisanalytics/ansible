@@ -47,6 +47,12 @@ options:
         To embed an inline policy, use M(iam_policy). To remove existing policies, use an empty list item.
     required: true
     aliases: ['managed_policies']
+  purge_policies:
+    description:
+      - Detaches any managed policies not listed in the "managed_policy" option. Set to false if you want to attach policies elsewhere.
+    type: bool
+    default: true
+    version_added: "2.4"
   state:
     description:
       - Create or remove the IAM role
@@ -202,6 +208,15 @@ def convert_friendly_names_to_arns(connection, module, policy_names):
         module.fail_json(msg="Couldn't find policy: " + str(e))
 
 
+def remove_policies(connection, module, policies_to_remove, params):
+    for policy in policies_to_remove:
+        try:
+            connection.detach_role_policy(RoleName=params['RoleName'], PolicyArn=policy)
+        except ClientError as e:
+            module.fail_json(msg=e.message, exception=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
+        return True
+
+
 def create_or_update_role(connection, module):
 
     params = dict()
@@ -235,31 +250,24 @@ def create_or_update_role(connection, module):
     if managed_policies is not None:
         # Get list of current attached managed policies
         current_attached_policies = get_attached_policy_list(connection, module, params['RoleName'])
+        current_attached_policies_arn_list = [policy['PolicyArn'] for policy in current_attached_policies]
 
         # If a single empty list item then all managed policies to be removed
-        if len(managed_policies) == 1 and not managed_policies[0]:
-            for policy in current_attached_policies:
-                try:
-                    connection.detach_role_policy(RoleName=params['RoleName'], PolicyArn=policy['PolicyArn'])
-                except ClientError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
+        if len(managed_policies) == 1 and not managed_policies[0] and module.params.get('purge_policies'):
+
+            # Detach policies not present
+            if remove_policies(connection, module, set(current_attached_policies_arn_list) - set(managed_policies), params):
                 changed = True
         else:
             # Make a list of the ARNs from the attached policies
-            current_attached_policies_arn_list = []
-            for policy in current_attached_policies:
-                current_attached_policies_arn_list.append(policy['PolicyArn'])
 
             # Detach roles not defined in task
-            for policy_arn in list(set(current_attached_policies_arn_list) - set(managed_policies)):
-                try:
-                    connection.detach_role_policy(RoleName=params['RoleName'], PolicyArn=policy_arn)
-                except ClientError as e:
-                    module.fail_json(msg=e.message, exception=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
-                changed = True
+            if module.params.get('purge_policies'):
+                if remove_policies(connection, module, set(current_attached_policies_arn_list) - set(managed_policies), params):
+                    changed = True
 
             # Attach roles not already attached
-            for policy_arn in list(set(managed_policies) - set(current_attached_policies_arn_list)):
+            for policy_arn in set(managed_policies) - set(current_attached_policies_arn_list):
                 try:
                     connection.attach_role_policy(RoleName=params['RoleName'], PolicyArn=policy_arn)
                 except ClientError as e:
@@ -346,7 +354,7 @@ def get_attached_policy_list(connection, module, name):
         return connection.list_attached_role_policies(RoleName=name)['AttachedPolicies']
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchEntity':
-            return None
+            return []
         else:
             module.fail_json(msg=e.message, exception=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
 
@@ -360,7 +368,8 @@ def main():
             path=dict(default="/", type='str'),
             assume_role_policy_document=dict(type='json'),
             managed_policy=dict(type='list', aliases=['managed_policies']),
-            state=dict(choices=['present', 'absent'], required=True)
+            state=dict(choices=['present', 'absent'], required=True),
+            purge_policies=dict(type='bool', default=True),
         )
     )
 
